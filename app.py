@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, url_for
 from scraper import WebScraper, ScraperError, AuthenticationError, ScrapingError, SelectorError, SeleniumError
 import json
 import os
@@ -42,124 +42,133 @@ def create_app(config_name='default'):
         """Handle scraping requests"""
         try:
             # Get form data
-            url = request.form.get('url')
+            url = request.form.get('url', '').strip()
             is_sitemap = request.form.get('is_sitemap') == 'on'
             use_selenium = request.form.get('use_selenium') == 'on'
-            wait_time = int(request.form.get('wait_time', 0))
-            is_crawl = request.form.get('is_crawl') == 'on'
-            max_pages = int(request.form.get('max_pages', 100))
-            same_domain_only = request.form.get('same_domain_only') == 'on'
             
             # Parse selectors
             try:
                 selectors = json.loads(request.form.get('selectors', '{}'))
             except json.JSONDecodeError:
+                app.logger.error("Invalid selectors format")
                 return jsonify({
-                    'error': 'Invalid JSON in selectors. Please check the format.',
-                    'details': 'Example format: {"title": "h1", "content": "p"}'
+                    'error': 'Invalid selectors format. Please enter HTML tags in the format "key: tag", one per line.'
                 }), 400
 
-            # Validate inputs
             if not url:
-                return jsonify({'error': 'URL is required'}), 400
-            if not selectors:
-                return jsonify({'error': 'At least one CSS selector is required'}), 400
+                app.logger.error("No URL provided")
+                return jsonify({
+                    'error': 'Please enter a URL'
+                }), 400
+
+            # Get crawling options
+            is_crawl = request.form.get('is_crawl') == 'on'
+            max_pages = int(request.form.get('max_pages', 100))
+            same_domain_only = request.form.get('same_domain_only') == 'on'
+            wait_time = int(request.form.get('wait_time', 0))
+
+            # Validate max_pages
+            if max_pages > 100:
+                app.logger.warning(f"Max pages reduced from {max_pages} to 100 for performance")
+                max_pages = 100
+
+            app.logger.info(f"Starting scrape for URL: {url}")
+            app.logger.debug(f"Selectors: {selectors}")
+            app.logger.debug(f"Options: sitemap={is_sitemap}, crawl={is_crawl}, max_pages={max_pages}, same_domain_only={same_domain_only}, wait_time={wait_time}")
 
             # Initialize scraper
-            scraper = WebScraper(use_selenium=use_selenium, debug=app.debug)
-            
-            try:
-                if is_crawl:
-                    # Handle website crawling
-                    data = scraper.crawl_and_scrape(
-                        url, 
-                        selectors,
-                        max_pages=max_pages,
-                        same_domain_only=same_domain_only,
-                        wait_time=wait_time
-                    )
-                elif is_sitemap:
-                    # Handle sitemap scraping
-                    data = scraper.scrape_from_sitemap(url, selectors, wait_time)
-                else:
-                    # Handle single page scraping
-                    soup = scraper.scrape(url, wait_time=wait_time)
-                    data = scraper.extract_data(soup, selectors)
+            scraper = WebScraper(
+                use_selenium=use_selenium,
+                debug=app.debug
+            )
 
-                # Save results
+            try:
+                # Scrape data
+                if is_sitemap:
+                    app.logger.info("Scraping from sitemap")
+                    data = scraper.scrape_sitemap(url, selectors)
+                elif is_crawl:
+                    app.logger.info("Crawling website")
+                    if selectors:
+                        data = scraper.crawl_and_scrape(url, selectors, max_pages, same_domain_only, wait_time)
+                    else:
+                        data = scraper.crawl_website(url, max_pages, same_domain_only)
+                else:
+                    app.logger.info("Scraping single page")
+                    if selectors:
+                        data = scraper.scrape_page(url, selectors)
+                    else:
+                        soup = scraper.scrape(url)
+                        data = [{
+                            'url': url,
+                            'title': soup.title.string if soup.title else None,
+                            'links': [a.get('href') for a in soup.find_all('a', href=True)]
+                        }]
+
+                if not data:
+                    app.logger.warning("No data found")
+                    return jsonify({
+                        'error': 'No data found'
+                    }), 404
+
+                # Save results to file
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                 filename = f'scraped_data_{timestamp}.json'
                 filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                 
-                scraper.save_to_json(data, filepath)
-                
+                with open(filepath, 'w') as f:
+                    json.dump(data, f, indent=2)
+
+                app.logger.info(f"Successfully scraped {len(data)} items")
                 return jsonify({
                     'success': True,
-                    'message': 'Data scraped successfully',
+                    'message': f'Successfully scraped {len(data)} items',
                     'data': data,
-                    'download_url': f'/download/{filename}'
+                    'download_url': url_for('download_file', filename=filename)
                 })
 
             except ScrapingError as e:
                 app.logger.error(f"Scraping error: {str(e)}")
                 return jsonify({
-                    'error': 'Failed to scrape the page',
-                    'details': str(e)
+                    'error': str(e)
                 }), 400
-                
-            except SelectorError as e:
-                app.logger.error(f"Selector error: {str(e)}")
+            except Exception as e:
+                app.logger.error(f"Unexpected error during scraping: {str(e)}")
+                app.logger.debug(traceback.format_exc())
                 return jsonify({
-                    'error': 'Failed to extract data with provided selectors',
-                    'details': str(e)
-                }), 400
-                
-            except SeleniumError as e:
-                app.logger.error(f"Selenium error: {str(e)}")
-                return jsonify({
-                    'error': 'Failed to initialize browser',
-                    'details': str(e)
+                    'error': f'An unexpected error occurred during scraping: {str(e)}'
                 }), 500
-                
-            except AuthenticationError as e:
-                app.logger.error(f"Authentication error: {str(e)}")
-                return jsonify({
-                    'error': 'Authentication failed',
-                    'details': str(e)
-                }), 401
-                
-            except ScraperError as e:
-                app.logger.error(f"Scraper error: {str(e)}")
-                return jsonify({
-                    'error': 'An error occurred during scraping',
-                    'details': str(e)
-                }), 500
-                
             finally:
                 scraper.close()
 
         except Exception as e:
-            app.logger.error(f"Unexpected error: {str(e)}")
+            app.logger.error(f"Error in scrape route: {str(e)}")
             app.logger.debug(traceback.format_exc())
             return jsonify({
-                'error': 'An unexpected error occurred',
-                'details': str(e)
+                'error': 'An unexpected error occurred'
             }), 500
 
     @app.route('/download/<filename>')
     def download_file(filename):
         """Handle file downloads"""
         try:
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            if not os.path.exists(filepath):
+                app.logger.error(f"File not found: {filename}")
+                return jsonify({
+                    'error': 'File not found'
+                }), 404
+            
             return send_file(
-                os.path.join(app.config['UPLOAD_FOLDER'], filename),
-                as_attachment=True
+                filepath,
+                as_attachment=True,
+                download_name=filename
             )
         except Exception as e:
             app.logger.error(f"Download error: {str(e)}")
             return jsonify({
-                'error': 'Failed to download file',
-                'details': str(e)
-            }), 404
+                'error': 'Failed to download file'
+            }), 500
 
     @app.errorhandler(404)
     def not_found_error(error):
@@ -184,4 +193,4 @@ def create_app(config_name='default'):
 
 if __name__ == '__main__':
     app = create_app(os.environ.get('FLASK_ENV', 'development'))
-    app.run(host='127.0.0.1', port=3000) 
+    app.run(host='127.0.0.1', port=9000) 

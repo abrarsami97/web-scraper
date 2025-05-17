@@ -69,11 +69,9 @@
             </div>
 
             <div class="form-group">
-                <label for="selectors">CSS Selectors (JSON format):</label>
-                <textarea class="form-control" id="selectors" name="selectors" rows="4" required></textarea>
-                <small class="form-text text-muted">
-                    Example: {"title": "h1", "content": "article p"}
-                </small>
+                <label for="selectors">HTML Selectors (Optional):</label>
+                <textarea class="form-control" id="selectors" name="selectors" rows="4" placeholder="Enter HTML tags, one per line. Example:&#10;title: h1&#10;content: p&#10;links: a"></textarea>
+                <small class="form-text text-muted">Leave empty to only crawl and collect links without extracting specific data.</small>
             </div>
 
             <div class="form-group">
@@ -81,7 +79,8 @@
                 <input type="number" class="form-control" id="waitTime" name="wait_time" value="0" min="0">
             </div>
 
-            <button type="submit" class="btn btn-primary">Scrape</button>
+            <button type="submit" id="submitBtn" class="btn btn-primary">Scrape</button>
+            <button type="button" id="stopBtn" class="btn btn-danger" style="display: none;">Stop Scraping</button>
         </form>
 
         <div class="loading mt-3" id="loadingSpinner" style="display: none;">
@@ -95,16 +94,30 @@
             </div>
         </div>
 
-        <div id="results" class="mt-4" style="display: none;">
-            <h3 class="mb-3">Results</h3>
-            <div id="resultData" class="bg-light p-3 rounded"></div>
+        <div id="results" class="mt-4">
+            <div id="resultData"></div>
             <div id="downloadLink" class="mt-3"></div>
+        </div>
+
+        <div id="resultsTable" class="mt-4" style="display: none;">
+            <h3>Scraped Data</h3>
+            <div class="table-responsive">
+                <table class="table table-striped table-bordered">
+                    <thead id="tableHeader">
+                    </thead>
+                    <tbody id="tableBody">
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
 
     <script>
         // Debug mode flag
         const DEBUG = true;
+
+        // Global variable to store the abort controller
+        let currentController = null;
 
         // Debug logging function
         function debugLog(...args) {
@@ -146,118 +159,183 @@
             }
         });
 
-        async function handleSubmit(event) {
-            event.preventDefault();
-            debugLog('Form submitted');
+        function displayResults(data) {
+            const resultsDiv = document.getElementById('results');
+            const resultsTable = document.getElementById('resultsTable');
+            const tableHeader = document.getElementById('tableHeader');
+            const tableBody = document.getElementById('tableBody');
             
-            const form = event.target;
-            const results = document.getElementById('results');
-            const resultData = document.getElementById('resultData');
-            const loadingSpinner = document.getElementById('loadingSpinner');
-            const submitButton = form.querySelector('button[type="submit"]');
-            
-            // Clear previous results
-            results.style.display = 'none';
-            resultData.innerHTML = '';
-            
-            try {
-                // Disable submit button and show loading spinner
-                submitButton.disabled = true;
-                loadingSpinner.style.display = 'block';
-                updateProgress(0, 'Initializing...');
-                
-                // Validate URL
-                const url = form.url.value.trim();
-                if (!url) {
-                    throw new Error('Please enter a URL');
-                }
-                
-                // Validate selectors
-                const selectorsText = form.selectors.value.trim();
-                if (!selectorsText) {
-                    throw new Error('Please enter CSS selectors');
-                }
-                
-                let selectors;
-                try {
-                    selectors = JSON.parse(selectorsText);
-                    if (Object.keys(selectors).length === 0) {
-                        throw new Error('At least one CSS selector is required');
-                    }
-                } catch (e) {
-                    throw new Error('Invalid JSON in selectors. Example format: {"title": "h1", "content": "p"}');
-                }
-                
-                // Collect form data
-                const formData = new FormData(form);
-                formData.set('selectors', JSON.stringify(selectors));
-                
-                debugLog('Sending request with data:', Object.fromEntries(formData));
-                updateProgress(10, 'Connecting to server...');
-                
-                // Send request
-                const response = await fetch('/scrape', {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                updateProgress(30, 'Processing response...');
-                const data = await response.json();
-                debugLog('Received response:', data);
-                
-                // Show results
-                results.style.display = 'block';
-                
-                if (!response.ok) {
-                    // Handle error response
-                    resultData.innerHTML = `
-                        <div class="alert alert-danger">
-                            <strong>Error:</strong> ${data.error}
-                            ${data.details ? `<br><small>${data.details}</small>` : ''}
-                        </div>
-                    `;
-                    return;
-                }
-                
-                updateProgress(100, 'Complete!');
-                
-                // Handle success response
-                resultData.innerHTML = `
+            if (data.error) {
+                resultsDiv.innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+                resultsTable.style.display = 'none';
+                return;
+            }
+
+            if (data.success) {
+                resultsDiv.innerHTML = `
                     <div class="alert alert-success">
-                        <strong>Success!</strong> ${data.message}
+                        ${data.message}
+                        <a href="${data.download_url}" class="btn btn-primary btn-sm ml-2">Download JSON</a>
                     </div>
-                    <div class="mt-3">
-                        <h5>Scraped Data:</h5>
-                        <pre class="bg-light p-3 rounded"><code>${JSON.stringify(data.data, null, 2)}</code></pre>
-                    </div>
-                    ${data.download_url ? `
-                        <div class="mt-3">
-                            <a href="${data.download_url}" class="btn btn-primary">
-                                <i class="fas fa-download"></i> Download JSON
-                            </a>
-                        </div>
-                    ` : ''}
                 `;
+
+                // Convert data to array if it's not already
+                let dataArray = Array.isArray(data.data) ? data.data : [data.data];
                 
-            } catch (error) {
-                debugLog('Error:', error);
-                results.style.display = 'block';
-                resultData.innerHTML = `
-                    <div class="alert alert-danger">
-                        <strong>Error:</strong> ${error.message}
-                    </div>
-                `;
-            } finally {
-                // Re-enable submit button and hide loading spinner after a short delay
-                setTimeout(() => {
-                    submitButton.disabled = false;
-                    loadingSpinner.style.display = 'none';
-                }, 1000);
+                // If data is an object with 'pages' property (from crawling)
+                if (data.data && data.data.pages) {
+                    dataArray = Object.entries(data.data.pages).map(([url, pageData]) => ({
+                        url: url,
+                        ...pageData
+                    }));
+                }
+
+                if (dataArray.length > 0) {
+                    // Get all unique keys from the data
+                    const headers = ['url'];
+                    dataArray.forEach(item => {
+                        Object.keys(item).forEach(key => {
+                            if (!headers.includes(key)) {
+                                headers.push(key);
+                            }
+                        });
+                    });
+
+                    // Create table header
+                    tableHeader.innerHTML = `
+                        <tr>
+                            ${headers.map(header => `<th>${header}</th>`).join('')}
+                        </tr>
+                    `;
+
+                    // Create table body
+                    tableBody.innerHTML = dataArray.map(row => `
+                        <tr>
+                            ${headers.map(header => {
+                                const value = row[header];
+                                if (header === 'url') {
+                                    return `<td><a href="${value}" target="_blank">${value}</a></td>`;
+                                }
+                                if (Array.isArray(value)) {
+                                    return `<td>${value.join(', ')}</td>`;
+                                }
+                                return `<td>${value || ''}</td>`;
+                            }).join('')}
+                        </tr>
+                    `).join('');
+
+                    resultsTable.style.display = 'block';
+                } else {
+                    resultsDiv.innerHTML += '<div class="alert alert-warning">No data to display</div>';
+                    resultsTable.style.display = 'none';
+                }
             }
         }
 
-        // Add event listener for form submission
+        function handleSubmit(event) {
+            event.preventDefault();
+            
+            // Show loading spinner and stop button, hide submit button
+            document.getElementById('loadingSpinner').style.display = 'block';
+            document.getElementById('submitBtn').style.display = 'none';
+            document.getElementById('stopBtn').style.display = 'inline-block';
+            
+            // Clear previous results
+            document.getElementById('results').innerHTML = '';
+            document.getElementById('resultsTable').style.display = 'none';
+            
+            // Get form data
+            const formData = new FormData(event.target);
+            
+            // Validate URL
+            const url = formData.get('url');
+            if (!url) {
+                showError('Please enter a URL');
+                return;
+            }
+            
+            // Convert HTML selectors to JSON format
+            const selectorsText = formData.get('selectors');
+            const selectors = {};
+            if (selectorsText) {
+                selectorsText.split('\n').forEach(selector => {
+                    selector = selector.trim();
+                    if (selector) {
+                        const [key, tag] = selector.split(':').map(s => s.trim());
+                        if (key && tag) {
+                            selectors[key] = tag;
+                        }
+                    }
+                });
+            }
+            
+            // Update form data with JSON selectors
+            formData.set('selectors', JSON.stringify(selectors));
+            
+            // Create new AbortController for this request
+            currentController = new AbortController();
+            const timeoutId = setTimeout(() => currentController.abort(), 300000); // 5 minute timeout
+
+            // Update progress to show we're starting
+            updateProgress(0, 'Initializing scraper...');
+
+            fetch('/scrape', {
+                method: 'POST',
+                body: formData,
+                signal: currentController.signal
+            })
+            .then(response => {
+                clearTimeout(timeoutId);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                displayResults(data);
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                let errorMessage = 'An error occurred while scraping. ';
+                if (error.name === 'AbortError') {
+                    errorMessage += 'The scraping process was stopped. This might be due to a timeout or the process taking too long. Try reducing the number of pages to crawl or unchecking "Use Selenium" if not needed.';
+                } else {
+                    errorMessage += error.message;
+                }
+                showError(errorMessage);
+            })
+            .finally(() => {
+                // Reset loading state
+                document.getElementById('loadingSpinner').style.display = 'none';
+                document.getElementById('submitBtn').style.display = 'inline-block';
+                document.getElementById('stopBtn').style.display = 'none';
+                updateProgress(0, '');
+                currentController = null;
+            });
+        }
+
+        function stopScraping() {
+            if (currentController) {
+                currentController.abort();
+                showError('Scraping process stopped by user.');
+            }
+        }
+
+        function showError(message) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = `<div class="alert alert-danger">${message}</div>`;
+            document.getElementById('resultsTable').style.display = 'none';
+            document.getElementById('loadingSpinner').style.display = 'none';
+            document.getElementById('submitBtn').style.display = 'inline-block';
+            document.getElementById('stopBtn').style.display = 'none';
+            updateProgress(0, '');
+        }
+
+        // Add form submit handler
         document.getElementById('scrapeForm').addEventListener('submit', handleSubmit);
+        
+        // Add stop button handler
+        document.getElementById('stopBtn').addEventListener('click', stopScraping);
 
         // Add error handling for network issues
         window.addEventListener('offline', function() {

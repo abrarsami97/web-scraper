@@ -284,11 +284,11 @@ class WebScraper:
 
     def extract_data(self, soup: BeautifulSoup, selectors: Dict[str, str]) -> Dict[str, Any]:
         """
-        Extract data from BeautifulSoup object using CSS selectors.
+        Extract data from BeautifulSoup object using HTML tags.
         
         Args:
             soup (BeautifulSoup): The BeautifulSoup object
-            selectors (dict): Dictionary of data keys and their CSS selectors
+            selectors (dict): Dictionary of data keys and their HTML tags
             
         Returns:
             dict: Extracted data
@@ -300,18 +300,35 @@ class WebScraper:
             raise SelectorError("No selectors provided")
             
         data = {}
-        for key, selector in selectors.items():
+        for key, tag in selectors.items():
             try:
-                self.logger.debug(f'Extracting data for key: {key} with selector: {selector}')
-                elements = soup.select(selector)
+                self.logger.debug(f'Extracting data for key: {key} with tag: {tag}')
+                # Find all elements with the given tag
+                elements = soup.find_all(tag)
+                
                 if elements:
                     if len(elements) == 1:
-                        data[key] = elements[0].get_text(strip=True)
+                        # For single elements, get text and href if it's a link
+                        element = elements[0]
+                        if element.name == 'a' and element.get('href'):
+                            data[key] = f"{element.get_text(strip=True)} ({element['href']})"
+                        elif element.name == 'img' and element.get('src'):
+                            data[key] = f"Image: {element['src']}"
+                        else:
+                            data[key] = element.get_text(strip=True)
                     else:
-                        data[key] = [elem.get_text(strip=True) for elem in elements]
+                        # For multiple elements, get text and href for each
+                        data[key] = []
+                        for element in elements:
+                            if element.name == 'a' and element.get('href'):
+                                data[key].append(f"{element.get_text(strip=True)} ({element['href']})")
+                            elif element.name == 'img' and element.get('src'):
+                                data[key].append(f"Image: {element['src']}")
+                            else:
+                                data[key].append(element.get_text(strip=True))
                     self.logger.debug(f'Successfully extracted data for {key}')
                 else:
-                    self.logger.warning(f'No elements found for selector: {selector}')
+                    self.logger.warning(f'No elements found for tag: {tag}')
                     data[key] = None
             except Exception as e:
                 error_msg = f"Failed to extract {key}: {str(e)}"
@@ -418,7 +435,16 @@ class WebScraper:
             discovered_urls = set([start_url])
             crawl_data = {}
             
+            # Set a timeout for the entire crawling process
+            start_time = time.time()
+            max_crawl_time = 240  # 4 minutes maximum crawl time
+            
             while discovered_urls and len(visited_urls) < max_pages:
+                # Check if we've exceeded the maximum crawl time
+                if time.time() - start_time > max_crawl_time:
+                    self.logger.warning(f"Crawl time exceeded {max_crawl_time} seconds")
+                    break
+                
                 # Get the next URL to crawl
                 current_url = discovered_urls.pop()
                 
@@ -428,11 +454,16 @@ class WebScraper:
                 try:
                     self.logger.debug(f'Crawling: {current_url}')
                     
-                    # Scrape the current page
-                    soup = self.scrape(current_url)
+                    # Scrape the current page with a timeout
+                    try:
+                        soup = self.scrape(current_url)
+                    except Exception as e:
+                        self.logger.error(f"Failed to scrape {current_url}: {str(e)}")
+                        continue
                     
                     # Extract all links from the page
                     links = soup.find_all('a', href=True)
+                    page_links = []
                     
                     # Process each link
                     for link in links:
@@ -455,11 +486,12 @@ class WebScraper:
                         # Add to discovered URLs if not visited
                         if absolute_url not in visited_urls:
                             discovered_urls.add(absolute_url)
+                            page_links.append(absolute_url)
                     
                     # Store the page data
                     crawl_data[current_url] = {
                         'title': soup.title.string if soup.title else None,
-                        'links': list(discovered_urls),
+                        'links': page_links,
                         'timestamp': datetime.now().isoformat()
                     }
                     
@@ -477,7 +509,9 @@ class WebScraper:
             return {
                 'base_url': start_url,
                 'total_pages': len(visited_urls),
-                'pages': crawl_data
+                'max_pages': max_pages,
+                'pages': crawl_data,
+                'crawl_time': time.time() - start_time
             }
             
         except Exception as e:
@@ -537,4 +571,65 @@ class WebScraper:
         except Exception as e:
             self.logger.error(f"Crawl and scrape failed: {str(e)}")
             self.logger.debug(traceback.format_exc())
-            return {} 
+            return {}
+
+    def scrape_page(self, url, selectors):
+        """Scrape a single page with the given selectors."""
+        try:
+            self.logger.info(f"Scraping page: {url}")
+            soup = self.scrape(url)
+            
+            # Extract data using selectors
+            data = self.extract_data(soup, selectors)
+            
+            # Add URL and slug information
+            data['url'] = url
+            data['slug'] = self._get_slug(url)
+            
+            return [data]  # Return as a list for consistency with sitemap scraping
+            
+        except Exception as e:
+            self.logger.error(f"Error scraping page {url}: {str(e)}")
+            self.logger.debug(traceback.format_exc())
+            raise ScrapingError(f"Failed to scrape page: {str(e)}")
+
+    def scrape_sitemap(self, url, selectors):
+        """Scrape all pages from a sitemap using the given selectors."""
+        try:
+            self.logger.info(f"Scraping sitemap: {url}")
+            urls = self.parse_sitemap(url)
+            
+            if not urls:
+                raise ScrapingError("No URLs found in sitemap")
+            
+            results = []
+            for page_url in urls:
+                try:
+                    self.logger.debug(f"Scraping page from sitemap: {page_url}")
+                    page_data = self.scrape_page(page_url, selectors)
+                    results.extend(page_data)
+                except Exception as e:
+                    self.logger.error(f"Error scraping page {page_url}: {str(e)}")
+                    continue
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Error scraping sitemap {url}: {str(e)}")
+            self.logger.debug(traceback.format_exc())
+            raise ScrapingError(f"Failed to scrape sitemap: {str(e)}")
+
+    def _get_slug(self, url):
+        """Extract the slug from a URL."""
+        try:
+            # Parse the URL
+            parsed = urlparse(url)
+            # Get the path and remove leading/trailing slashes
+            path = parsed.path.strip('/')
+            # Split by slashes and get the last part
+            parts = path.split('/')
+            # Return the last part or the full path if it's short
+            return parts[-1] if len(parts) > 1 else path
+        except Exception as e:
+            self.logger.error(f"Error extracting slug from {url}: {str(e)}")
+            return '' 
