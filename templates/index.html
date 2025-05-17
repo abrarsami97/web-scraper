@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Scraper</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .container { max-width: 800px; margin-top: 2rem; }
+        .form-group { margin-bottom: 1rem; }
+        #results { margin-top: 2rem; }
+        .loading { display: none; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container">
+        <h1 class="text-4xl font-bold text-center mb-8 text-gray-800">Advanced Web Scraper</h1>
+        
+        <form id="scrapeForm">
+            <div class="form-group">
+                <label for="url">URL or Sitemap URL:</label>
+                <input type="url" class="form-control" id="url" name="url" required>
+            </div>
+
+            <div class="form-group">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="isSitemap" name="is_sitemap">
+                    <label class="form-check-label" for="isSitemap">
+                        This is a sitemap URL
+                    </label>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="isCrawl" name="is_crawl">
+                    <label class="form-check-label" for="isCrawl">
+                        Crawl entire website
+                    </label>
+                </div>
+            </div>
+
+            <div id="crawlOptions" class="form-group" style="display: none;">
+                <div class="row">
+                    <div class="col-md-6">
+                        <label for="maxPages">Maximum Pages to Crawl:</label>
+                        <input type="number" class="form-control" id="maxPages" name="max_pages" value="100" min="1" max="1000">
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-check mt-4">
+                            <input class="form-check-input" type="checkbox" id="sameDomainOnly" name="same_domain_only" checked>
+                            <label class="form-check-label" for="sameDomainOnly">
+                                Stay on same domain
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="useSelenium" name="use_selenium">
+                    <label class="form-check-label" for="useSelenium">
+                        Use Selenium (for JavaScript-heavy sites)
+                    </label>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="selectors">CSS Selectors (JSON format):</label>
+                <textarea class="form-control" id="selectors" name="selectors" rows="4" required></textarea>
+                <small class="form-text text-muted">
+                    Example: {"title": "h1", "content": "article p"}
+                </small>
+            </div>
+
+            <div class="form-group">
+                <label for="waitTime">Wait Time (seconds):</label>
+                <input type="number" class="form-control" id="waitTime" name="wait_time" value="0" min="0">
+            </div>
+
+            <button type="submit" class="btn btn-primary">Scrape</button>
+        </form>
+
+        <div class="loading mt-3" id="loadingSpinner" style="display: none;">
+            <div class="progress">
+                <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated" 
+                     role="progressbar" style="width: 0%" 
+                     aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+            </div>
+            <div class="mt-2">
+                <small id="progressStatus" class="text-muted">Initializing...</small>
+            </div>
+        </div>
+
+        <div id="results" class="mt-4" style="display: none;">
+            <h3 class="mb-3">Results</h3>
+            <div id="resultData" class="bg-light p-3 rounded"></div>
+            <div id="downloadLink" class="mt-3"></div>
+        </div>
+    </div>
+
+    <script>
+        // Debug mode flag
+        const DEBUG = true;
+
+        // Debug logging function
+        function debugLog(...args) {
+            if (DEBUG) {
+                console.log(...args);
+            }
+        }
+
+        // Update progress bar
+        function updateProgress(percent, status) {
+            const progressBar = document.getElementById('progressBar');
+            const progressStatus = document.getElementById('progressStatus');
+            
+            progressBar.style.width = `${percent}%`;
+            progressBar.setAttribute('aria-valuenow', percent);
+            progressBar.textContent = `${percent}%`;
+            progressStatus.textContent = status || 'Processing...';
+        }
+
+        // Toggle crawl options visibility
+        document.getElementById('isCrawl').addEventListener('change', function() {
+            const crawlOptions = document.getElementById('crawlOptions');
+            const isSitemap = document.getElementById('isSitemap');
+            
+            if (this.checked) {
+                crawlOptions.style.display = 'block';
+                isSitemap.checked = false;
+            } else {
+                crawlOptions.style.display = 'none';
+            }
+        });
+
+        // Toggle sitemap checkbox
+        document.getElementById('isSitemap').addEventListener('change', function() {
+            const isCrawl = document.getElementById('isCrawl');
+            if (this.checked) {
+                isCrawl.checked = false;
+                document.getElementById('crawlOptions').style.display = 'none';
+            }
+        });
+
+        async function handleSubmit(event) {
+            event.preventDefault();
+            debugLog('Form submitted');
+            
+            const form = event.target;
+            const results = document.getElementById('results');
+            const resultData = document.getElementById('resultData');
+            const loadingSpinner = document.getElementById('loadingSpinner');
+            const submitButton = form.querySelector('button[type="submit"]');
+            
+            // Clear previous results
+            results.style.display = 'none';
+            resultData.innerHTML = '';
+            
+            try {
+                // Disable submit button and show loading spinner
+                submitButton.disabled = true;
+                loadingSpinner.style.display = 'block';
+                updateProgress(0, 'Initializing...');
+                
+                // Validate URL
+                const url = form.url.value.trim();
+                if (!url) {
+                    throw new Error('Please enter a URL');
+                }
+                
+                // Validate selectors
+                const selectorsText = form.selectors.value.trim();
+                if (!selectorsText) {
+                    throw new Error('Please enter CSS selectors');
+                }
+                
+                let selectors;
+                try {
+                    selectors = JSON.parse(selectorsText);
+                    if (Object.keys(selectors).length === 0) {
+                        throw new Error('At least one CSS selector is required');
+                    }
+                } catch (e) {
+                    throw new Error('Invalid JSON in selectors. Example format: {"title": "h1", "content": "p"}');
+                }
+                
+                // Collect form data
+                const formData = new FormData(form);
+                formData.set('selectors', JSON.stringify(selectors));
+                
+                debugLog('Sending request with data:', Object.fromEntries(formData));
+                updateProgress(10, 'Connecting to server...');
+                
+                // Send request
+                const response = await fetch('/scrape', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                updateProgress(30, 'Processing response...');
+                const data = await response.json();
+                debugLog('Received response:', data);
+                
+                // Show results
+                results.style.display = 'block';
+                
+                if (!response.ok) {
+                    // Handle error response
+                    resultData.innerHTML = `
+                        <div class="alert alert-danger">
+                            <strong>Error:</strong> ${data.error}
+                            ${data.details ? `<br><small>${data.details}</small>` : ''}
+                        </div>
+                    `;
+                    return;
+                }
+                
+                updateProgress(100, 'Complete!');
+                
+                // Handle success response
+                resultData.innerHTML = `
+                    <div class="alert alert-success">
+                        <strong>Success!</strong> ${data.message}
+                    </div>
+                    <div class="mt-3">
+                        <h5>Scraped Data:</h5>
+                        <pre class="bg-light p-3 rounded"><code>${JSON.stringify(data.data, null, 2)}</code></pre>
+                    </div>
+                    ${data.download_url ? `
+                        <div class="mt-3">
+                            <a href="${data.download_url}" class="btn btn-primary">
+                                <i class="fas fa-download"></i> Download JSON
+                            </a>
+                        </div>
+                    ` : ''}
+                `;
+                
+            } catch (error) {
+                debugLog('Error:', error);
+                results.style.display = 'block';
+                resultData.innerHTML = `
+                    <div class="alert alert-danger">
+                        <strong>Error:</strong> ${error.message}
+                    </div>
+                `;
+            } finally {
+                // Re-enable submit button and hide loading spinner after a short delay
+                setTimeout(() => {
+                    submitButton.disabled = false;
+                    loadingSpinner.style.display = 'none';
+                }, 1000);
+            }
+        }
+
+        // Add event listener for form submission
+        document.getElementById('scrapeForm').addEventListener('submit', handleSubmit);
+
+        // Add error handling for network issues
+        window.addEventListener('offline', function() {
+            const resultData = document.getElementById('resultData');
+            resultData.innerHTML = `
+                <div class="alert alert-danger">
+                    <strong>Error:</strong> No internet connection
+                </div>
+            `;
+        });
+
+        // Add error handling for unhandled promise rejections
+        window.addEventListener('unhandledrejection', function(event) {
+            const resultData = document.getElementById('resultData');
+            resultData.innerHTML = `
+                <div class="alert alert-danger">
+                    <strong>Error:</strong> ${event.reason.message || 'An unexpected error occurred'}
+                </div>
+            `;
+        });
+
+        debugLog('Application initialized');
+    </script>
+</body>
+</html> 

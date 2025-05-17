@@ -1,0 +1,15 @@
+[Unit]
+Description=Web Scraper Application
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/webscraper
+Environment="PATH=/var/www/webscraper/.venv/bin"
+Environment="FLASK_ENV=production"
+Environment="SECRET_KEY=your-secure-secret-key-here"
+ExecStart=/var/www/webscraper/.venv/bin/gunicorn --workers 3 --bind unix:webscraper.sock -m 007 wsgi:app
+
+[Install]
+WantedBy=multi-user.target 
