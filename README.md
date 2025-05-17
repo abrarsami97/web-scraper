@@ -16,7 +16,7 @@ A powerful web scraping application built with Flask and Selenium that supports 
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/web-scraper.git
+git clone https://github.com/abrarsami/web-scraper.git
 cd web-scraper
 ```
 
